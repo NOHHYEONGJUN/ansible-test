@@ -1,0 +1,172 @@
+---
+- name: Deploy OpenTelemetry Collector to Linux VM
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    otel_version: "0.102.1"
+    otel_install_dir: "/opt/otelcol-contrib"
+    otel_config_path: "/etc/otelcol-contrib/config.yaml"
+    otel_service_name: "otelcol-contrib"
+
+    # 퍼블릭 저장소에는 내부 URL을 두지 않음 — AWX Job Template extra_vars 또는 인벤토리/그룹 변수로 필수 지정
+    otel_prom_rw_endpoint: ""
+    otel_prom_rw_org_id: "anonymous"
+
+    # (선택) 배포 요약 출력용 — 비우면 해당 줄 생략
+    owatch_grafana_url: ""
+
+    # 필요 시 AWX launch extra_vars 로 조정 가능
+    monitor_metrics: true
+    monitor_logs: false
+    monitor_traces: false
+
+  pre_tasks:
+    - name: Require prometheus remote_write URL (not stored in git)
+      ansible.builtin.assert:
+        that:
+          - otel_prom_rw_endpoint is defined
+          - (otel_prom_rw_endpoint | trim | length) > 0
+        fail_msg: >
+          otel_prom_rw_endpoint 가 비어 있습니다. AWX Job Template의 Extra Variables 등으로
+          Mimir(또는 호환) remote_write URL 전체를 설정하세요. 예: http://gateway:8080/api/v1/push
+
+    - name: Map architecture for otel tarball
+      ansible.builtin.set_fact:
+        otel_arch: >-
+          {{
+            'amd64' if ansible_architecture in ['x86_64', 'amd64']
+            else 'arm64' if ansible_architecture in ['aarch64', 'arm64']
+            else ''
+          }}
+
+    - name: Fail when architecture is unsupported
+      ansible.builtin.fail:
+        msg: "Unsupported architecture: {{ ansible_architecture }}"
+      when: otel_arch == ''
+
+    - name: Ensure required packages on Debian family
+      ansible.builtin.apt:
+        update_cache: true
+        name:
+          - curl
+          - tar
+          - ca-certificates
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: Ensure required packages on RedHat family
+      ansible.builtin.yum:
+        name:
+          - curl
+          - tar
+          - ca-certificates
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+  tasks:
+    - name: Ensure otel service user exists
+      ansible.builtin.user:
+        name: otelcol
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: false
+
+    - name: Ensure install and config directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ otel_install_dir }}"
+        - "/etc/otelcol-contrib"
+
+    - name: Download OpenTelemetry Collector Contrib tarball
+      ansible.builtin.get_url:
+        url: "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v{{ otel_version }}/otelcol-contrib_{{ otel_version }}_linux_{{ otel_arch }}.tar.gz"
+        dest: "/tmp/otelcol-contrib_{{ otel_version }}_linux_{{ otel_arch }}.tar.gz"
+        mode: "0644"
+
+    - name: Unarchive OpenTelemetry Collector Contrib
+      ansible.builtin.unarchive:
+        src: "/tmp/otelcol-contrib_{{ otel_version }}_linux_{{ otel_arch }}.tar.gz"
+        dest: "{{ otel_install_dir }}"
+        remote_src: true
+        extra_opts:
+          - --overwrite
+
+    - name: Ensure collector binary has executable permission
+      ansible.builtin.file:
+        path: "{{ otel_install_dir }}/otelcol-contrib"
+        state: file
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Template collector config
+      ansible.builtin.template:
+        src: templates/config.yaml.j2
+        dest: "{{ otel_config_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart otel collector
+
+    - name: Install systemd service unit
+      ansible.builtin.template:
+        src: templates/otelcol-contrib.service.j2
+        dest: "/etc/systemd/system/{{ otel_service_name }}.service"
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - Reload systemd
+        - Restart otel collector
+
+    - name: Flush handlers before health checks
+      ansible.builtin.meta: flush_handlers
+
+    - name: Ensure otel collector service is enabled and running
+      ansible.builtin.systemd:
+        name: "{{ otel_service_name }}"
+        enabled: true
+        state: started
+
+    - name: Wait for OTLP gRPC endpoint
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 4317
+        delay: 1
+        timeout: 30
+
+    - name: Wait for internal prometheus metrics endpoint
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 8888
+        delay: 1
+        timeout: 30
+
+    - name: Print deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "OpenTelemetry Collector deployed on {{ inventory_hostname }}"
+          - "Config: {{ otel_config_path }}"
+          - "Remote write endpoint: {{ otel_prom_rw_endpoint }}"
+
+    - name: Print Grafana URL when provided via extra_vars
+      ansible.builtin.debug:
+        msg: "Grafana URL: {{ owatch_grafana_url | trim }}"
+      when: (owatch_grafana_url | default('', true) | trim | length) > 0
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Restart otel collector
+      ansible.builtin.systemd:
+        name: "{{ otel_service_name }}"
+        state: restarted
