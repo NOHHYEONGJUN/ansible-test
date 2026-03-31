@@ -1,0 +1,105 @@
+{# OpenTelemetry Collector — metrics (Prometheus remote_write) + logs (filelog → Loki OTLP)
+   host.name 은 메트릭/로그 공통으로 inventory_hostname 으로 upsert (Grafana 연동용)
+   참고: awx-example/loki-playbook.md
+#}
+extensions:
+  health_check: {}
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+receivers:
+{% if monitor_metrics | bool %}
+  hostmetrics:
+    collection_interval: 10s
+    scrapers:
+      cpu: {}
+      memory: {}
+      load: {}
+      disk: {}
+      network: {}
+      filesystem: {}
+
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: "otel-collector"
+          scrape_interval: 10s
+          static_configs:
+            - targets: ["0.0.0.0:8888"]
+{% endif %}
+
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+{% if monitor_logs | bool %}
+  filelog:
+    include: [/var/log/syslog, /var/log/auth.log]
+    start_at: end
+    operators:
+      - type: regex_parser
+        regex: '^(?P<time>\S+)\s+(?P<host>\S+)\s+(?P<process>[^:\[\s]+)(?:\[(?P<pid>\d+)\])?:\s+(?P<msg>.*)$'
+        timestamp:
+          parse_from: attributes.time
+          layout_type: gotime
+          layout: '2006-01-02T15:04:05.999999-07:00'
+{% endif %}
+
+processors:
+  resource:
+    attributes:
+      - key: host.name
+        value: "{{ inventory_hostname }}"
+        action: upsert
+{% if monitor_logs | bool %}
+      - key: service.name
+        value: "ubuntu-system"
+        action: upsert
+{% endif %}
+
+  batch:
+    send_batch_size: 1000
+    timeout: 10s
+
+exporters:
+  debug:
+    verbosity: basic
+
+{% if monitor_metrics | bool %}
+  prometheusremotewrite:
+    endpoint: "{{ otel_prom_rw_endpoint }}"
+    timeout: 30s
+    headers:
+      X-Scope-OrgID: "{{ otel_prom_rw_org_id }}"
+    resource_to_telemetry_conversion:
+      enabled: true
+{% endif %}
+
+{% if monitor_logs | bool %}
+  "otlphttp/loki":
+    endpoint: "{{ otel_loki_endpoint | trim | regex_replace('/$', '') }}/otlp"
+{% endif %}
+
+service:
+  telemetry:
+    metrics:
+      address: 0.0.0.0:8888
+
+  extensions: [health_check, zpages]
+
+  pipelines:
+{% if monitor_metrics | bool %}
+    metrics:
+      receivers: [hostmetrics, prometheus, otlp]
+      processors: [resource, batch]
+      exporters: [debug, prometheusremotewrite]
+{% endif %}
+{% if monitor_logs | bool %}
+    logs:
+      receivers: [filelog]
+      processors: [resource, batch]
+      exporters: [debug, "otlphttp/loki"]
+{% endif %}
