@@ -1,5 +1,5 @@
-{# OpenTelemetry Collector — metrics (Prometheus remote_write) + logs (filelog → Loki Dedicated Exporter)
-   host.name 리소스 속성을 Loki의 정식 인덱스 라벨(host_name)로 승격하여 Grafana 드롭다운 활성화
+{# OpenTelemetry Collector — metrics + logs (Loki Dedicated Exporter)
+   resource_to_labels: true 설정을 통해 Grafana 드롭다운 메뉴 활성화
 #}
 extensions:
   health_check: {}
@@ -35,7 +35,6 @@ receivers:
         endpoint: 0.0.0.0:4318
 
 {% if monitor_logs | bool %}
-  # 실제 시스템 로그 수집
   filelog:
     include: [/var/log/syslog, /var/log/auth.log]
     start_at: end
@@ -79,14 +78,10 @@ exporters:
 {% endif %}
 
 {% if monitor_logs | bool %}
-  # 핵심 수정: otlphttp 대신 전용 loki 익스포터 사용하여 라벨 인덱싱 강제 지정
+  # 수정 포인트: labels 블록 제거 및 resource_to_labels 추가
   loki:
     endpoint: "{{ otel_loki_endpoint | trim | regex_replace('/$', '') }}/loki/api/v1/push"
-    labels:
-      resource:
-        # 리소스의 host.name을 Loki의 host_name 라벨(인덱스)로 매핑
-        host.name: "host_name"
-        service.name: "service_name"
+    resource_to_labels: true 
 {% endif %}
 
 service:
@@ -107,6 +102,5 @@ service:
     logs:
       receivers: [filelog]
       processors: [resource, batch]
-      # exporters를 loki로 변경하고 debug를 제외하여 실제 시스템 로그만 전송
-      exporters: [loki]
+      exporters: [loki] 
 {% endif %}
