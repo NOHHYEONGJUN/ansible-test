@@ -1,5 +1,12 @@
-{# OpenTelemetry Collector — metrics + logs (Loki)
-   0.102.x 버전에서는 별도 설정 없이 resource 속성을 자동으로 라벨링합니다.
+{# OpenTelemetry Collector — metrics + logs (Loki via OTLP ingestion)
+
+   중요:
+   - Grafana Loki의 OTLP ingestion은 "어떤 resource attribute를 index label로 승격할지"를 Loki 서버 설정으로 결정합니다.
+   - 기본값으로 service.name 등 일부만 index label이 되며, host.name(→host_name)은 보통 structured metadata로 저장되어
+     Grafana Explore의 Label filters 드롭다운(/labels)에는 안 보일 수 있습니다.
+
+   그래서 Collector 쪽에서는 host.name을 유지하면서, 기본 index label에 포함되는 service.instance.id에도 동일 값을 넣어
+   Grafana에서 'Label filters → service_instance_id=<vm>'로 필터링 가능하게 합니다.
 #}
 extensions:
   health_check: {}
@@ -50,9 +57,7 @@ receivers:
 processors:
   resource:
     attributes:
-      # host.name / service.name 은 Loki에서 host_name / service_name 으로 변환될 수 있습니다.
-      # 다만 OTLP→Loki 에서는 어떤 리소스 속성을 "인덱스 라벨"로 승격할지 힌트가 필요할 수 있어
-      # loki.resource.labels 로 명시합니다(그래야 Grafana Explore의 Label filters에 host_name이 나타납니다).
+      # host.name은 메트릭/로그 공통 식별자(대시보드 변수)로 유지합니다.
       - key: host.name
         value: "{{ inventory_hostname }}"
         action: upsert
@@ -60,8 +65,10 @@ processors:
       - key: service.name
         value: "ubuntu-system"
         action: upsert
-      - key: loki.resource.labels
-        value: "host.name,service.name"
+      # Loki OTLP ingestion 기본 index label 목록에 포함되는 값.
+      # 결과 라벨: service_instance_id={{ inventory_hostname }}
+      - key: service.instance.id
+        value: "{{ inventory_hostname }}"
         action: upsert
 {% endif %}
 
