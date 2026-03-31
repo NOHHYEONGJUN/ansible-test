@@ -1,5 +1,5 @@
-{# OpenTelemetry Collector — metrics (Prometheus remote_write) + logs (filelog → Loki OTLP)
-   host.name 은 메트릭/로그 공통으로 inventory_hostname 으로 upsert (Grafana 연동용)
+{# OpenTelemetry Collector — metrics (Prometheus remote_write) + logs (filelog → Loki Dedicated Exporter)
+   host.name 리소스 속성을 Loki의 정식 인덱스 라벨(host_name)로 승격하여 Grafana 드롭다운 활성화
 #}
 extensions:
   health_check: {}
@@ -35,7 +35,7 @@ receivers:
         endpoint: 0.0.0.0:4318
 
 {% if monitor_logs | bool %}
-  # 실제 시스템 로그 수집에 집중
+  # 실제 시스템 로그 수집
   filelog:
     include: [/var/log/syslog, /var/log/auth.log]
     start_at: end
@@ -51,7 +51,6 @@ receivers:
 processors:
   resource:
     attributes:
-      # 프로메테우스의 instance/hostname 라벨과 일치시키기 위한 핵심 설정
       - key: host.name
         value: "{{ inventory_hostname }}"
         action: upsert
@@ -66,7 +65,6 @@ processors:
     timeout: 10s
 
 exporters:
-  # 디버그는 로컬 로그(journalctl)로만 보고 Loki로는 쏘지 않음 (노이즈 방지)
   debug:
     verbosity: basic
 
@@ -81,8 +79,14 @@ exporters:
 {% endif %}
 
 {% if monitor_logs | bool %}
-  "otlphttp/loki":
-    endpoint: "{{ otel_loki_endpoint | trim | regex_replace('/$', '') }}/otlp"
+  # 핵심 수정: otlphttp 대신 전용 loki 익스포터 사용하여 라벨 인덱싱 강제 지정
+  loki:
+    endpoint: "{{ otel_loki_endpoint | trim | regex_replace('/$', '') }}/loki/api/v1/push"
+    labels:
+      resource:
+        # 리소스의 host.name을 Loki의 host_name 라벨(인덱스)로 매핑
+        host.name: "host_name"
+        service.name: "service_name"
 {% endif %}
 
 service:
@@ -103,6 +107,6 @@ service:
     logs:
       receivers: [filelog]
       processors: [resource, batch]
-      # exporters에서 debug를 제거하여 실제 로그만 Loki로 전송
-      exporters: ["otlphttp/loki"]
+      # exporters를 loki로 변경하고 debug를 제외하여 실제 시스템 로그만 전송
+      exporters: [loki]
 {% endif %}
