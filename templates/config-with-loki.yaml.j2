@@ -1,5 +1,5 @@
-{# OpenTelemetry Collector — metrics + logs (Loki)
-   0.102.x 버전에서는 별도 설정 없이 resource 속성을 자동으로 라벨링합니다.
+{# OpenTelemetry Collector — metrics + logs
+   Loki 드롭다운 메뉴 활성화를 위해 점(.) 대신 언더바(_) 라벨 사용
 #}
 extensions:
   health_check: {}
@@ -50,8 +50,16 @@ receivers:
 processors:
   resource:
     attributes:
-      # 이 두 값이 Loki의 인덱스 라벨(host_name, service_name)로 자동 변환됩니다.
+      # 1. host.name (OTLP 표준 - 메타데이터로 저장됨)
       - key: host.name
+        value: "{{ inventory_hostname }}"
+        action: upsert
+      # 2. host_name (Loki가 인덱스 라벨로 인식하도록 언더바 사용)
+      - key: host_name
+        value: "{{ inventory_hostname }}"
+        action: upsert
+      # 3. instance (프로메테우스와 완벽한 일치를 위해 추가)
+      - key: instance
         value: "{{ inventory_hostname }}"
         action: upsert
 {% if monitor_logs | bool %}
@@ -79,18 +87,16 @@ exporters:
 {% endif %}
 
 {% if monitor_logs | bool %}
-  # 에러의 원인이었던 labels, resource_to_labels를 모두 제거한 순정 버전
-  loki:
-    endpoint: "{{ otel_loki_endpoint | trim | regex_replace('/$', '') }}/loki/api/v1/push"
+  # 가장 안정적인 otlphttp 사용 (Loki 3.0 최적화)
+  "otlphttp/loki":
+    endpoint: "{{ otel_loki_endpoint | trim | regex_replace('/$', '') }}/otlp"
 {% endif %}
 
 service:
   telemetry:
     metrics:
       address: 0.0.0.0:8888
-
   extensions: [health_check, zpages]
-
   pipelines:
 {% if monitor_metrics | bool %}
     metrics:
@@ -102,5 +108,5 @@ service:
     logs:
       receivers: [filelog]
       processors: [resource, batch]
-      exporters: [loki] 
+      exporters: ["otlphttp/loki"]
 {% endif %}
