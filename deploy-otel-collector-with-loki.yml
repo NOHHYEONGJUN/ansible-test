@@ -1,15 +1,4 @@
 ---
-# OpenTelemetry Collector: 메트릭(Prometheus remote_write) + 로그(filelog → Loki OTLP)
-# Grafana에서 host.name(= inventory_hostname)으로 메트릭·로그를 같이 필터링할 수 있게 resource 프로세서를 통일합니다.
-# 참고: awx-example/loki-playbook.md
-#
-# AWX Extra Variables 예시:
-#   otel_prom_rw_endpoint: "http://mimir-gateway:8080/api/v1/push"
-#   otel_loki_endpoint: "http://loki-gateway:3100"
-#   otel_prom_rw_org_id: "anonymous"
-#   monitor_metrics: true
-#   monitor_logs: true
-#
 - name: Deploy OpenTelemetry Collector with Loki logs (Linux)
   hosts: all
   become: true
@@ -20,15 +9,10 @@
     otel_install_dir: "/opt/otelcol-contrib"
     otel_config_path: "/etc/otelcol-contrib/config.yaml"
     otel_service_name: "otelcol-contrib"
-
     otel_prom_rw_endpoint: ""
     otel_prom_rw_org_id: "anonymous"
-
-    # Loki OTLP HTTP 베이스 URL (끝 /otlp 는 템플릿에서 붙임). 예: http://loki:3100
     otel_loki_endpoint: ""
-
     owatch_grafana_url: ""
-
     monitor_metrics: true
     monitor_logs: true
     monitor_traces: false
@@ -38,16 +22,14 @@
       ansible.builtin.assert:
         that:
           - (monitor_metrics | bool) or (monitor_logs | bool)
-        fail_msg: monitor_metrics 또는 monitor_logs 중 하나 이상 true 여야 합니다.
+        fail_msg: "monitor_metrics 또는 monitor_logs 중 하나 이상 true 여야 합니다."
 
     - name: Require prometheus remote_write URL when metrics enabled
       ansible.builtin.assert:
         that:
           - otel_prom_rw_endpoint is defined
           - (otel_prom_rw_endpoint | trim | length) > 0
-        fail_msg: >
-          monitor_metrics 가 true 인데 otel_prom_rw_endpoint 가 비어 있습니다.
-          AWX Extra Variables 등으로 Mimir(또는 호환) remote_write URL 전체를 설정하세요.
+        fail_msg: "metrics가 켜졌지만 otel_prom_rw_endpoint가 비어 있습니다."
       when: monitor_metrics | bool
 
     - name: Require Loki OTLP base URL when logs enabled
@@ -55,43 +37,8 @@
         that:
           - otel_loki_endpoint is defined
           - (otel_loki_endpoint | trim | length) > 0
-        fail_msg: >
-          monitor_logs 가 true 인데 otel_loki_endpoint 가 비어 있습니다.
-          Loki OTLP HTTP 베이스 URL을 설정하세요 (예: http://loki:3100). 경로 /otlp 는 자동으로 붙습니다.
+        fail_msg: "logs가 켜졌지만 otel_loki_endpoint가 비어 있습니다."
       when: monitor_logs | bool
-
-    - name: Map architecture for otel tarball
-      ansible.builtin.set_fact:
-        otel_arch: >-
-          {{
-            'amd64' if ansible_architecture in ['x86_64', 'amd64']
-            else 'arm64' if ansible_architecture in ['aarch64', 'arm64']
-            else ''
-          }}
-
-    - name: Fail when architecture is unsupported
-      ansible.builtin.fail:
-        msg: "Unsupported architecture: {{ ansible_architecture }}"
-      when: otel_arch == ''
-
-    - name: Ensure required packages on Debian family
-      ansible.builtin.apt:
-        update_cache: true
-        name:
-          - curl
-          - tar
-          - ca-certificates
-        state: present
-      when: ansible_os_family == 'Debian'
-
-    - name: Ensure required packages on RedHat family
-      ansible.builtin.yum:
-        name:
-          - curl
-          - tar
-          - ca-certificates
-        state: present
-      when: ansible_os_family == 'RedHat'
 
   tasks:
     - name: Ensure otel service user exists
@@ -101,13 +48,13 @@
         shell: /usr/sbin/nologin
         create_home: false
 
+    # 실제 로그 파일(/var/log/syslog)을 읽기 위해 adm 그룹에 추가 (필수)
     - name: Add otelcol user to adm group for syslog access
       ansible.builtin.user:
         name: otelcol
         groups: adm
         append: true
       when: monitor_logs | bool
-      notify: Restart otel collector
 
     - name: Ensure install and config directories exist
       ansible.builtin.file:
@@ -120,27 +67,15 @@
         - "{{ otel_install_dir }}"
         - "/etc/otelcol-contrib"
 
-    - name: Download OpenTelemetry Collector Contrib tarball
-      ansible.builtin.get_url:
-        url: "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v{{ otel_version }}/otelcol-contrib_{{ otel_version }}_linux_{{ otel_arch }}.tar.gz"
-        dest: "/tmp/otelcol-contrib_{{ otel_version }}_linux_{{ otel_arch }}.tar.gz"
-        mode: "0644"
-
-    - name: Unarchive OpenTelemetry Collector Contrib
+    - name: Download and Unarchive OpenTelemetry Collector
       ansible.builtin.unarchive:
-        src: "/tmp/otelcol-contrib_{{ otel_version }}_linux_{{ otel_arch }}.tar.gz"
+        src: "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v{{ otel_version }}/otelcol-contrib_{{ otel_version }}_linux_{{ ('amd64' if ansible_architecture in ['x86_64', 'amd64'] else 'arm64') }}.tar.gz"
         dest: "{{ otel_install_dir }}"
         remote_src: true
-        extra_opts:
-          - --overwrite
-
-    - name: Ensure collector binary has executable permission
-      ansible.builtin.file:
-        path: "{{ otel_install_dir }}/otelcol-contrib"
-        state: file
         owner: root
         group: root
         mode: "0755"
+        extra_opts: [--overwrite]
 
     - name: Template collector config (metrics + Loki logs)
       ansible.builtin.template:
@@ -155,10 +90,8 @@
       ansible.builtin.template:
         src: templates/otelcol-contrib.service.j2
         dest: "/etc/systemd/system/{{ otel_service_name }}.service"
-        owner: root
-        group: root
         mode: "0644"
-      notify:
+      notify: 
         - Reload systemd
         - Restart otel collector
 
@@ -171,33 +104,12 @@
         enabled: true
         state: started
 
-    - name: Wait for OTLP gRPC endpoint
-      ansible.builtin.wait_for:
-        host: 127.0.0.1
-        port: 4317
-        delay: 1
-        timeout: 30
-
-    - name: Wait for internal prometheus metrics endpoint
+    - name: Wait for internal health check endpoint
       ansible.builtin.wait_for:
         host: 127.0.0.1
         port: 8888
-        delay: 1
-        timeout: 30
+        timeout: 10
       when: monitor_metrics | bool
-
-    - name: Print deployment summary
-      ansible.builtin.debug:
-        msg:
-          - "OpenTelemetry Collector (metrics + optional Loki logs) on {{ inventory_hostname }}"
-          - "Config: {{ otel_config_path }}"
-          - "Remote write: {{ otel_prom_rw_endpoint if (monitor_metrics | bool) else '(metrics off)' }}"
-          - "Loki OTLP base: {{ otel_loki_endpoint if (monitor_logs | bool) else '(logs off)' }}"
-
-    - name: Print Grafana URL when provided via extra_vars
-      ansible.builtin.debug:
-        msg: "Grafana URL: {{ owatch_grafana_url | trim }}"
-      when: (owatch_grafana_url | default('', true) | trim | length) > 0
 
   handlers:
     - name: Reload systemd
