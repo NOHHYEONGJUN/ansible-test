@@ -1,0 +1,407 @@
+---
+- name: Deploy OpenTelemetry Collector to Linux VM
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    otel_version: "0.102.1"
+    otel_install_dir: "/opt/otelcol-contrib"
+    otel_config_path: "/etc/otelcol-contrib/config.yaml"
+    otel_service_name: "otelcol-contrib"
+
+    # 퍼블릭 저장소에는 내부 URL을 두지 않음 — AWX Job Template extra_vars 또는 인벤토리/그룹 변수로 필수 지정
+    otel_prom_rw_endpoint: ""
+    otel_prom_rw_org_id: "anonymous"
+
+    # (선택) 배포 요약 출력용 — 비우면 해당 줄 생략
+    owatch_grafana_url: ""
+
+    # Grafana 알람 자동 생성(스모크 테스트용)
+    # - 기본 false: 설정 누락/부주의로 알람이 만들어지는 것을 방지
+    # - 활성화: OWATCH_GRAFANA_ALERT_AUTO_PROVISION=true (AWX Job Extra Vars 또는 환경변수)
+    enable_grafana_alert_auto_provision: false
+    grafana_service_account_token: ""
+    grafana_prometheus_datasource_uid: ""
+    grafana_org_id: 1
+    grafana_alert_folder_title: "Owatch Alerts"
+    grafana_alert_rule_group: "Owatch Auto"
+    grafana_validate_certs: true
+
+    # 필요 시 AWX launch extra_vars 로 조정 가능
+    monitor_metrics: true
+    monitor_logs: false
+    monitor_traces: false
+
+  pre_tasks:
+    - name: Require prometheus remote_write URL (not stored in git)
+      ansible.builtin.assert:
+        that:
+          - otel_prom_rw_endpoint is defined
+          - (otel_prom_rw_endpoint | trim | length) > 0
+        fail_msg: >
+          otel_prom_rw_endpoint 가 비어 있습니다. AWX Job Template의 Extra Variables 등으로
+          Mimir(또는 호환) remote_write URL 전체를 설정하세요. 예: http://gateway:8080/api/v1/push
+
+    - name: Map architecture for otel tarball
+      ansible.builtin.set_fact:
+        otel_arch: >-
+          {{
+            'amd64' if ansible_architecture in ['x86_64', 'amd64']
+            else 'arm64' if ansible_architecture in ['aarch64', 'arm64']
+            else ''
+          }}
+
+    - name: Fail when architecture is unsupported
+      ansible.builtin.fail:
+        msg: "Unsupported architecture: {{ ansible_architecture }}"
+      when: otel_arch == ''
+
+    - name: Ensure required packages on Debian family
+      ansible.builtin.apt:
+        update_cache: true
+        name:
+          - curl
+          - tar
+          - ca-certificates
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: Ensure required packages on RedHat family
+      ansible.builtin.yum:
+        name:
+          - curl
+          - tar
+          - ca-certificates
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+  tasks:
+    - name: Ensure otel service user exists
+      ansible.builtin.user:
+        name: otelcol
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: false
+
+    - name: Ensure install and config directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ otel_install_dir }}"
+        - "/etc/otelcol-contrib"
+
+    - name: Download OpenTelemetry Collector Contrib tarball
+      ansible.builtin.get_url:
+        url: "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v{{ otel_version }}/otelcol-contrib_{{ otel_version }}_linux_{{ otel_arch }}.tar.gz"
+        dest: "/tmp/otelcol-contrib_{{ otel_version }}_linux_{{ otel_arch }}.tar.gz"
+        mode: "0644"
+
+    - name: Unarchive OpenTelemetry Collector Contrib
+      ansible.builtin.unarchive:
+        src: "/tmp/otelcol-contrib_{{ otel_version }}_linux_{{ otel_arch }}.tar.gz"
+        dest: "{{ otel_install_dir }}"
+        remote_src: true
+        extra_opts:
+          - --overwrite
+
+    - name: Ensure collector binary has executable permission
+      ansible.builtin.file:
+        path: "{{ otel_install_dir }}/otelcol-contrib"
+        state: file
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Template collector config
+      ansible.builtin.template:
+        src: templates/config.yaml.j2
+        dest: "{{ otel_config_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart otel collector
+
+    - name: Install systemd service unit
+      ansible.builtin.template:
+        src: templates/otelcol-contrib.service.j2
+        dest: "/etc/systemd/system/{{ otel_service_name }}.service"
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - Reload systemd
+        - Restart otel collector
+
+    - name: Flush handlers before health checks
+      ansible.builtin.meta: flush_handlers
+
+    - name: Ensure otel collector service is enabled and running
+      ansible.builtin.systemd:
+        name: "{{ otel_service_name }}"
+        enabled: true
+        state: started
+
+    - name: Wait for OTLP gRPC endpoint
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 4317
+        delay: 1
+        timeout: 30
+
+    - name: Wait for internal prometheus metrics endpoint
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 8888
+        delay: 1
+        timeout: 30
+
+    # Grafana 유니파이드 알레르팅(Managed alerts)용 “테스트 알람” 1개를 각 VM별로 생성
+    # - 표현식: up > 2 (대부분 환경에서 up은 0/1이라 절대 firing 안함 → 생성/권한 확인용)
+    # - 생성 성공/실패는 로그로 남기되, 배포 실패로 연결되진 않도록 스킵/failed_when false 처리
+    - name: (Grafana) Create alert rule after collector install (test smoke)
+      when:
+        - enable_grafana_alert_auto_provision | bool
+        - (owatch_grafana_url | trim | length) > 0
+        - (grafana_service_account_token | trim | length) > 0
+        - (grafana_prometheus_datasource_uid | trim | length) > 0
+      vars:
+        grafana_base: "{{ owatch_grafana_url | trim | regex_replace('/$', '') }}"
+        alert_uid: >-
+          {{ ('owatch-' ~ inventory_hostname) | regex_replace('[^a-zA-Z0-9_-]', '-') | lower | regex_replace('-+', '-') | truncate(40, true, '') }}
+        alert_folder_uid: ""
+        alert_rule_title: "{{ 'owatch-test-' ~ inventory_hostname }}"
+        alert_rule_summary: "{{ 'Owatch test alert (' ~ inventory_hostname ~ ')' }}"
+        query_ref_a: "A"
+        expr_ref_b: "B"
+      block:
+        - name: Get Grafana folders (alert folder uid lookup)
+          ansible.builtin.uri:
+            url: "{{ grafana_base }}/api/folders?limit=5000"
+            method: GET
+            headers:
+              Authorization: "Bearer {{ grafana_service_account_token }}"
+              Accept: "application/json"
+            return_content: true
+            validate_certs: "{{ grafana_validate_certs }}"
+          register: grafana_folders_resp
+          failed_when: false
+
+        - name: Resolve alert folder uid
+          ansible.builtin.set_fact:
+            alert_folder_uid: >-
+              {{
+                (
+                  (grafana_folders_resp.json | default([]))
+                  | selectattr('title', 'equalto', grafana_alert_folder_title)
+                  | map(attribute='uid')
+                  | list
+                  | first
+                ) | default('')
+              }}
+          when: grafana_folders_resp is defined
+
+        - name: Create alert folder if missing
+          ansible.builtin.uri:
+            url: "{{ grafana_base }}/api/folders"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ grafana_service_account_token }}"
+              Accept: "application/json"
+              Content-Type: "application/json"
+            body_format: json
+            body:
+              title: "{{ grafana_alert_folder_title }}"
+            return_content: true
+            validate_certs: "{{ grafana_validate_certs }}"
+          register: grafana_folder_create_resp
+          when: (alert_folder_uid | trim | length) == 0
+          failed_when: false
+
+        - name: Set alert folder uid after create
+          ansible.builtin.set_fact:
+            alert_folder_uid: "{{ grafana_folder_create_resp.json.uid | default(alert_folder_uid) }}"
+          when:
+            - (alert_folder_uid | trim | length) == 0
+            - grafana_folder_create_resp is defined
+
+        - name: Upsert alert rule (PUT)
+          ansible.builtin.uri:
+            url: "{{ grafana_base }}/api/v1/provisioning/alert-rules/{{ alert_uid }}"
+            method: PUT
+            headers:
+              Authorization: "Bearer {{ grafana_service_account_token }}"
+              Accept: "application/json"
+              Content-Type: "application/json"
+            body_format: json
+            body:
+              title: "{{ alert_rule_title }}"
+              ruleGroup: "{{ grafana_alert_rule_group }}"
+              folderUID: "{{ alert_folder_uid }}"
+              noDataState: "OK"
+              execErrState: "OK"
+              for: "5m"
+              orgId: "{{ grafana_org_id }}"
+              uid: "{{ alert_uid }}"
+              condition: "{{ expr_ref_b }}"
+              annotations:
+                summary: "{{ alert_rule_summary }}"
+              labels:
+                service: "owatch"
+                vm: "{{ inventory_hostname }}"
+              data:
+                - refId: "{{ query_ref_a }}"
+                  queryType: ""
+                  relativeTimeRange:
+                    from: 900
+                    to: 0
+                  datasourceUid: "{{ grafana_prometheus_datasource_uid }}"
+                  model:
+                    expr: "up"
+                    hide: false
+                    intervalMs: 1000
+                    maxDataPoints: 43200
+                    refId: "{{ query_ref_a }}"
+                - refId: "{{ expr_ref_b }}"
+                  queryType: ""
+                  relativeTimeRange:
+                    from: 0
+                    to: 0
+                  datasourceUid: "-100"
+                  model:
+                    conditions:
+                      - evaluator:
+                          params: [2]
+                          type: "gt"
+                        operator:
+                          type: "and"
+                        query:
+                          params: ["{{ query_ref_a }}"]
+                        reducer:
+                          params: []
+                          type: "last"
+                        type: "query"
+                    datasource:
+                      type: "__expr__"
+                      uid: "-100"
+                    hide: false
+                    intervalMs: 1000
+                    maxDataPoints: 43200
+                    refId: "{{ expr_ref_b }}"
+                    type: "classic_conditions"
+            return_content: true
+            validate_certs: "{{ grafana_validate_certs }}"
+            status_code: [200, 201, 202, 204, 404]
+          register: grafana_alert_put_resp
+          failed_when: false
+
+        - name: Fallback create alert rule (POST) when PUT returned 404
+          ansible.builtin.uri:
+            url: "{{ grafana_base }}/api/v1/provisioning/alert-rules"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ grafana_service_account_token }}"
+              Accept: "application/json"
+              Content-Type: "application/json"
+            body_format: json
+            body:
+              title: "{{ alert_rule_title }}"
+              ruleGroup: "{{ grafana_alert_rule_group }}"
+              folderUID: "{{ alert_folder_uid }}"
+              noDataState: "OK"
+              execErrState: "OK"
+              for: "5m"
+              orgId: "{{ grafana_org_id }}"
+              uid: "{{ alert_uid }}"
+              condition: "{{ expr_ref_b }}"
+              annotations:
+                summary: "{{ alert_rule_summary }}"
+              labels:
+                service: "owatch"
+                vm: "{{ inventory_hostname }}"
+              data:
+                - refId: "{{ query_ref_a }}"
+                  queryType: ""
+                  relativeTimeRange:
+                    from: 900
+                    to: 0
+                  datasourceUid: "{{ grafana_prometheus_datasource_uid }}"
+                  model:
+                    expr: "up"
+                    hide: false
+                    intervalMs: 1000
+                    maxDataPoints: 43200
+                    refId: "{{ query_ref_a }}"
+                - refId: "{{ expr_ref_b }}"
+                  queryType: ""
+                  relativeTimeRange:
+                    from: 0
+                    to: 0
+                  datasourceUid: "-100"
+                  model:
+                    conditions:
+                      - evaluator:
+                          params: [2]
+                          type: "gt"
+                        operator:
+                          type: "and"
+                        query:
+                          params: ["{{ query_ref_a }}"]
+                        reducer:
+                          params: []
+                          type: "last"
+                        type: "query"
+                    datasource:
+                      type: "__expr__"
+                      uid: "-100"
+                    hide: false
+                    intervalMs: 1000
+                    maxDataPoints: 43200
+                    refId: "{{ expr_ref_b }}"
+                    type: "classic_conditions"
+            return_content: true
+            validate_certs: "{{ grafana_validate_certs }}"
+            status_code: [200, 201, 202, 204]
+          register: grafana_alert_post_resp
+          when: grafana_alert_put_resp.status | default(0) == 404
+          failed_when: false
+
+        - name: Print Grafana alert provision result
+          ansible.builtin.debug:
+            msg:
+              - "Grafana alert upsert attempted: uid={{ alert_uid }}, folderUID={{ alert_folder_uid }}"
+              - "PUT status: {{ grafana_alert_put_resp.status | default('n/a') }}"
+              - "POST status: {{ grafana_alert_post_resp.status | default('n/a') }}"
+          failed_when: false
+      rescue:
+        - name: Ignore Grafana alert provisioning errors (smoke test)
+          ansible.builtin.debug:
+            msg:
+              - "Grafana alert provisioning failed on {{ inventory_hostname }} (ignored)."
+
+    - name: Print deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "OpenTelemetry Collector deployed on {{ inventory_hostname }}"
+          - "Config: {{ otel_config_path }}"
+          - "Remote write endpoint: {{ otel_prom_rw_endpoint }}"
+
+    - name: Print Grafana URL when provided via extra_vars
+      ansible.builtin.debug:
+        msg: "Grafana URL: {{ owatch_grafana_url | trim }}"
+      when: (owatch_grafana_url | default('', true) | trim | length) > 0
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Restart otel collector
+      ansible.builtin.systemd:
+        name: "{{ otel_service_name }}"
+        state: restarted
+
