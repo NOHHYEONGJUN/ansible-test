@@ -77,7 +77,6 @@
     - name: Ensure required packages (Amazon Linux 2023 — dnf)
       ansible.builtin.dnf:
         name:
-          - curl
           - tar
           - ca-certificates
         state: present
