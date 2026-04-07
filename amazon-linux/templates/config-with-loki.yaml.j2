@@ -38,9 +38,8 @@ receivers:
         endpoint: 0.0.0.0:4318
 
 {% if monitor_logs | bool %}
-  journald:
-    {# 전체 저널(필터 없음). storage: 영속 저널이 있으면 persistent #}
-    storage_mode: persistent
+  {# 0.102.x journald 수신기는 storage_mode 키를 지원하지 않음(설정 시 기동 실패) #}
+  journald: {}
 {% endif %}
 
 processors:
