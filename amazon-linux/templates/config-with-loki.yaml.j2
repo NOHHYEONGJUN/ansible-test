@@ -92,10 +92,11 @@ processors:
     log_statements:
       - context: log
         statements:
-          - set(body, Concat([String(time), " ", String(resource.attributes["host.name"]), " ", String(body["SYSLOG_IDENTIFIER"]), ": ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil and body["SYSLOG_IDENTIFIER"] != nil
-          - set(body, Concat([String(time), " ", String(resource.attributes["host.name"]), " ", String(body["_COMM"]), ": ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil and body["_COMM"] != nil
-          - set(body, Concat([String(time), " ", String(resource.attributes["host.name"]), " ", String(body["UNIT"]), ": ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil and body["UNIT"] != nil
-          - set(body, Concat([String(time), " ", String(resource.attributes["host.name"]), " journal: ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil
+          # OTTL 안의 ": " 가 YAML 에서 매핑으로 오해되므로 전체 문을 작은따옴표로 감쌈
+          - 'set(body, Concat([String(time), " ", String(resource.attributes["host.name"]), " ", String(body["SYSLOG_IDENTIFIER"]), ": ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil and body["SYSLOG_IDENTIFIER"] != nil'
+          - 'set(body, Concat([String(time), " ", String(resource.attributes["host.name"]), " ", String(body["_COMM"]), ": ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil and body["_COMM"] != nil'
+          - 'set(body, Concat([String(time), " ", String(resource.attributes["host.name"]), " ", String(body["UNIT"]), ": ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil and body["UNIT"] != nil'
+          - 'set(body, Concat([String(time), " ", String(resource.attributes["host.name"]), " journal: ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil'
 {% endif %}
 
 exporters:
