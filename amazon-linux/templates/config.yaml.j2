@@ -13,7 +13,32 @@ receivers:
       load: {}
       disk: {}
       network: {}
-      {# filesystem 은 비루트 otelcol 에서 일부 마운트에서 실패·재시작 루프 유발(AL2023 등) #}
+      filesystem:
+        exclude_mount_points:
+          match_type: regexp
+          mount_points:
+            - /dev/.*
+            - /proc/.*
+            - /sys/.*
+            - /run/.*
+            - /var/lib/containers/.*
+            - /var/lib/docker/.*
+            - /run/containerd/.*
+        exclude_fs_types:
+          match_type: strict
+          fs_types:
+            - autofs
+            - binfmt_misc
+            - bpf
+            - cgroup2
+            - configfs
+            - debugfs
+            - devpts
+            - devtmpfs
+            - overlay
+            - proc
+            - sysfs
+            - tmpfs
 
   prometheus:
     config:

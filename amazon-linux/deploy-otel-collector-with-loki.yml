@@ -169,6 +169,25 @@
         enabled: true
         state: started
 
+    # otel_loki_endpoint 는 AWX 가 아니라 이 EC2에서 curl 되는 주소여야 함(보안 그룹·사설 DNS).
+    - name: Probe Loki /ready from target host (logs pipeline)
+      ansible.builtin.uri:
+        url: "{{ (otel_loki_endpoint | trim | regex_replace('/$', '')) }}/ready"
+        method: GET
+        status_code: [200, 503]
+        timeout: 15
+      register: loki_ready
+      failed_when: false
+      changed_when: false
+      when: monitor_logs | bool
+
+    - name: Loki reachability hint for operators
+      ansible.builtin.debug:
+        msg:
+          - "Loki GET .../ready → HTTP {{ loki_ready.status | default('연결 실패') }} (200=정상, 503=Loki 기동 중). 0이면 VM→Loki 네트워크/DNS/방화벽 확인."
+          - "Grafana Explore LogQL 라벨 예: {service_name=\"amazon-linux-system\"} | json 또는 service_instance_id=\"{{ inventory_hostname }}\""
+      when: monitor_logs | bool
+
     - name: Wait for OTLP gRPC (show journal on timeout)
       block:
         - name: Wait for OTLP gRPC endpoint
