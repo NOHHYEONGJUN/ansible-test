@@ -11,6 +11,10 @@ extensions:
     endpoint: 0.0.0.0:55679
 
 receivers:
+{# journald 를 otlp 다음에 두면 일부 환경에서 들여쓰기가 otlp.protocols 아래로 붙는 YAML 오해석이 나와 otlp에 invalid key journald 오류가 남 #}
+{% if monitor_logs | bool %}
+  journald: {}
+{% endif %}
 {% if monitor_metrics | bool %}
   hostmetrics:
     collection_interval: 10s
@@ -29,18 +33,12 @@ receivers:
           static_configs:
             - targets: ["0.0.0.0:8888"]
 {% endif %}
-
   otlp:
     protocols:
       grpc:
         endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
-
-{% if monitor_logs | bool %}
-  {# 0.102.x journald 수신기는 storage_mode 키를 지원하지 않음(설정 시 기동 실패) #}
-  journald: {}
-{% endif %}
 
 processors:
   resource:
