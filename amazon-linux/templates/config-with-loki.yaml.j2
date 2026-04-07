@@ -88,11 +88,16 @@ processors:
     log_statements:
       - context: log
         statements:
-          # OTTL 안의 ": " 가 YAML 에서 매핑으로 오해되므로 전체 문을 작은따옴표로 감쌈
-          - 'set(body, Concat([String(time), " ", String(resource.attributes["host.name"]), " ", String(body["SYSLOG_IDENTIFIER"]), ": ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil and body["SYSLOG_IDENTIFIER"] != nil'
-          - 'set(body, Concat([String(time), " ", String(resource.attributes["host.name"]), " ", String(body["_COMM"]), ": ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil and body["_COMM"] != nil'
-          - 'set(body, Concat([String(time), " ", String(resource.attributes["host.name"]), " ", String(body["UNIT"]), ": ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil and body["UNIT"] != nil'
-          - 'set(body, Concat([String(time), " ", String(resource.attributes["host.name"]), " journal: ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil'
+          # 로그 줄 hostname: journald _HOSTNAME(보통 ip-10-x… 형·FQDN) 우선, 첫 "." 뒤 도메인 제거 → Ubuntu syslog 의 짧은 형태와 비슷하게
+          # replace_pattern 은 set() 인자 안에 넣으면 OTTL 파서가 거부할 수 있어 cache 에 문자열을 올린 뒤 단독 문으로 치환
+          - 'set(cache["line_host"], String(body["_HOSTNAME"])) where IsMap(body) and body["_HOSTNAME"] != nil'
+          - 'set(cache["line_host"], String(resource.attributes["host.name"])) where IsMap(body) and body["_HOSTNAME"] == nil'
+          - 'replace_pattern(cache["line_host"], "\\..*", "") where cache["line_host"] != nil and IsMatch(cache["line_host"], "\\.")'
+          # OTTL 안의 ": " 가 YAML 에서 매핑으로 오해되므로 아래 set 문은 작은따옴표로 감쌈
+          - 'set(body, Concat([String(time), " ", cache["line_host"], " ", String(body["SYSLOG_IDENTIFIER"]), ": ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil and body["SYSLOG_IDENTIFIER"] != nil'
+          - 'set(body, Concat([String(time), " ", cache["line_host"], " ", String(body["_COMM"]), ": ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil and body["_COMM"] != nil'
+          - 'set(body, Concat([String(time), " ", cache["line_host"], " ", String(body["UNIT"]), ": ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil and body["UNIT"] != nil'
+          - 'set(body, Concat([String(time), " ", cache["line_host"], " journal: ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil'
 {% endif %}
 
   batch:
