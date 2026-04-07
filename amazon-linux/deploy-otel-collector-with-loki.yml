@@ -1,0 +1,201 @@
+---
+- name: Deploy OpenTelemetry Collector with Loki logs (Amazon Linux)
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    otel_version: "0.102.1"
+    otel_install_dir: "/opt/otelcol-contrib"
+    otel_config_path: "/etc/otelcol-contrib/config.yaml"
+    otel_service_name: "otelcol-contrib"
+    otel_prom_rw_endpoint: ""
+    otel_prom_rw_org_id: "anonymous"
+    otel_loki_endpoint: ""
+    owatch_grafana_url: ""
+    monitor_metrics: true
+    monitor_logs: true
+    monitor_traces: false
+
+  pre_tasks:
+    - name: Require target OS is Amazon Linux
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution is defined
+          - ansible_distribution == 'Amazon'
+        fail_msg: >
+          이 플레이북은 Amazon Linux 전용입니다.
+          (distribution={{ ansible_distribution | default('unknown') }}).
+          Ubuntu(filelog) 등은 github/ubuntu/ 플레이북을 사용하세요.
+
+    - name: Require at least one pipeline (metrics or logs)
+      ansible.builtin.assert:
+        that:
+          - (monitor_metrics | bool) or (monitor_logs | bool)
+        fail_msg: "monitor_metrics 또는 monitor_logs 중 하나 이상 true 여야 합니다."
+
+    - name: Require prometheus remote_write URL when metrics enabled
+      ansible.builtin.assert:
+        that:
+          - otel_prom_rw_endpoint is defined
+          - (otel_prom_rw_endpoint | trim | length) > 0
+        fail_msg: "metrics가 켜졌지만 otel_prom_rw_endpoint가 비어 있습니다."
+      when: monitor_metrics | bool
+
+    - name: Require Loki OTLP base URL when logs enabled
+      ansible.builtin.assert:
+        that:
+          - otel_loki_endpoint is defined
+          - (otel_loki_endpoint | trim | length) > 0
+        fail_msg: "logs가 켜졌지만 otel_loki_endpoint가 비어 있습니다."
+      when: monitor_logs | bool
+
+    - name: Map architecture for otel tarball
+      ansible.builtin.set_fact:
+        otel_arch: >-
+          {{
+            'amd64' if ansible_architecture in ['x86_64', 'amd64']
+            else 'arm64' if ansible_architecture in ['aarch64', 'arm64']
+            else ''
+          }}
+
+    - name: Fail when architecture is unsupported
+      ansible.builtin.fail:
+        msg: "Unsupported architecture: {{ ansible_architecture }}"
+      when: otel_arch == ''
+
+    - name: Ensure required packages (Amazon Linux 2 — yum)
+      ansible.builtin.yum:
+        name:
+          - curl
+          - tar
+          - ca-certificates
+        state: present
+        update_cache: true
+      when: ansible_distribution_major_version == '2'
+
+    - name: Ensure required packages (Amazon Linux 2023 — dnf)
+      ansible.builtin.dnf:
+        name:
+          - curl
+          - tar
+          - ca-certificates
+        state: present
+        update_cache: true
+      when: ansible_distribution_major_version == '2023'
+
+    - name: Fail on unexpected Amazon Linux major version
+      ansible.builtin.fail:
+        msg: >
+          지원하지 않는 Amazon Linux 버전입니다 (major={{ ansible_distribution_major_version }}).
+          2 또는 2023만 처리합니다.
+      when: ansible_distribution_major_version not in ['2', '2023']
+
+  tasks:
+    - name: Ensure otel service user exists
+      ansible.builtin.user:
+        name: otelcol
+        system: true
+        shell: /sbin/nologin
+        create_home: false
+
+    # journald 수신기가 systemd 저널을 읽으려면 보조 그룹 필요 (Amazon Linux 2/2023)
+    - name: Add otelcol user to systemd-journal group for journald receiver
+      ansible.builtin.user:
+        name: otelcol
+        groups: systemd-journal
+        append: true
+      when: monitor_logs | bool
+
+    - name: Ensure install and config directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ otel_install_dir }}"
+        - "/etc/otelcol-contrib"
+
+    - name: Download OpenTelemetry Collector Contrib tarball
+      ansible.builtin.get_url:
+        url: "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v{{ otel_version }}/otelcol-contrib_{{ otel_version }}_linux_{{ otel_arch }}.tar.gz"
+        dest: "/tmp/otelcol-contrib_{{ otel_version }}_linux_{{ otel_arch }}.tar.gz"
+        mode: "0644"
+
+    - name: Unarchive OpenTelemetry Collector Contrib
+      ansible.builtin.unarchive:
+        src: "/tmp/otelcol-contrib_{{ otel_version }}_linux_{{ otel_arch }}.tar.gz"
+        dest: "{{ otel_install_dir }}"
+        remote_src: true
+        extra_opts:
+          - --overwrite
+
+    - name: Ensure collector binary has executable permission
+      ansible.builtin.file:
+        path: "{{ otel_install_dir }}/otelcol-contrib"
+        state: file
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Template collector config (metrics + journald → Loki)
+      ansible.builtin.template:
+        src: templates/config-with-loki.yaml.j2
+        dest: "{{ otel_config_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart otel collector
+
+    - name: Install systemd service unit
+      ansible.builtin.template:
+        src: templates/otelcol-contrib.service.j2
+        dest: "/etc/systemd/system/{{ otel_service_name }}.service"
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - Reload systemd
+        - Restart otel collector
+
+    - name: Flush handlers before health checks
+      ansible.builtin.meta: flush_handlers
+
+    - name: Ensure otel collector service is enabled and running
+      ansible.builtin.systemd:
+        name: "{{ otel_service_name }}"
+        enabled: true
+        state: started
+
+    - name: Wait for OTLP gRPC endpoint
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 4317
+        delay: 1
+        timeout: 30
+
+    - name: Wait for internal prometheus metrics endpoint
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 8888
+        delay: 1
+        timeout: 30
+      when: monitor_metrics | bool
+
+    - name: Print deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "OpenTelemetry Collector (Amazon Linux {{ ansible_distribution_major_version }}) with journald→Loki on {{ inventory_hostname }}"
+          - "Config: {{ otel_config_path }}"
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Restart otel collector
+      ansible.builtin.systemd:
+        name: "{{ otel_service_name }}"
+        state: restarted

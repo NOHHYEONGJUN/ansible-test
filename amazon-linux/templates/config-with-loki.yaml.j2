@@ -1,0 +1,104 @@
+{# OpenTelemetry Collector — Amazon Linux: metrics + systemd journal → Loki (OTLP)
+
+   Ubuntu용 filelog(/var/log/syslog) 대신 journald 수신기를 씁니다.
+   otelcol 사용자는 플레이북에서 systemd-journal 보조 그룹이 필요합니다.
+
+   Loki OTLP index label / service.instance.id 설명은 github/templates/config-with-loki.yaml.j2 와 동일합니다.
+#}
+extensions:
+  health_check: {}
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+receivers:
+{% if monitor_metrics | bool %}
+  hostmetrics:
+    collection_interval: 10s
+    scrapers:
+      cpu: {}
+      memory: {}
+      load: {}
+      disk: {}
+      network: {}
+      filesystem: {}
+
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: "otel-collector"
+          scrape_interval: 10s
+          static_configs:
+            - targets: ["0.0.0.0:8888"]
+{% endif %}
+
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+{% if monitor_logs | bool %}
+  journald:
+    {# 전체 저널(필터 없음). storage: 영속 저널이 있으면 persistent #}
+    storage_mode: persistent
+{% endif %}
+
+processors:
+  resource:
+    attributes:
+      - key: host.name
+        value: "{{ inventory_hostname }}"
+        action: upsert
+{% if monitor_logs | bool %}
+      - key: service.name
+        value: "amazon-linux-system"
+        action: upsert
+      - key: service.instance.id
+        value: "{{ inventory_hostname }}"
+        action: upsert
+{% endif %}
+
+  batch:
+    send_batch_size: 1000
+    timeout: 10s
+
+exporters:
+  debug:
+    verbosity: basic
+
+{% if monitor_metrics | bool %}
+  prometheusremotewrite:
+    endpoint: "{{ otel_prom_rw_endpoint }}"
+    timeout: 30s
+    headers:
+      X-Scope-OrgID: "{{ otel_prom_rw_org_id }}"
+    resource_to_telemetry_conversion:
+      enabled: true
+{% endif %}
+
+{% if monitor_logs | bool %}
+  "otlphttp/loki":
+    endpoint: "{{ otel_loki_endpoint | trim | regex_replace('/$', '') }}/otlp"
+{% endif %}
+
+service:
+  telemetry:
+    metrics:
+      address: 0.0.0.0:8888
+
+  extensions: [health_check, zpages]
+
+  pipelines:
+{% if monitor_metrics | bool %}
+    metrics:
+      receivers: [hostmetrics, prometheus, otlp]
+      processors: [resource, batch]
+      exporters: [debug, prometheusremotewrite]
+{% endif %}
+{% if monitor_logs | bool %}
+    logs:
+      receivers: [journald]
+      processors: [resource, batch]
+      exporters: ["otlphttp/loki"]
+{% endif %}

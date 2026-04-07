@@ -1,0 +1,88 @@
+---
+# amazon-linux/deploy-otel-collector.yml 로 설치한 OTel Collector(systemd + /opt + /etc)를 제거합니다.
+# Amazon Linux 2 / 2023 에서 동일 경로를 사용합니다.
+- name: Remove OpenTelemetry Collector from Amazon Linux VM
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    otel_install_dir: "/opt/otelcol-contrib"
+    otel_config_dir: "/etc/otelcol-contrib"
+    otel_service_name: "otelcol-contrib"
+    otel_service_user: "otelcol"
+    otel_remove_service_user: true
+
+  pre_tasks:
+    - name: Require target OS is Amazon Linux
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution is defined
+          - ansible_distribution == 'Amazon'
+        fail_msg: >
+          이 제거 플레이북은 Amazon Linux 전용입니다.
+          (distribution={{ ansible_distribution | default('unknown') }}).
+
+  tasks:
+    - name: Check if systemd unit file exists
+      ansible.builtin.stat:
+        path: "/etc/systemd/system/{{ otel_service_name }}.service"
+      register: otel_unit
+
+    - name: Stop and disable otel collector service
+      ansible.builtin.systemd:
+        name: "{{ otel_service_name }}"
+        state: stopped
+        enabled: false
+      when: otel_unit.stat.exists
+      failed_when: false
+
+    - name: Remove systemd unit file
+      ansible.builtin.file:
+        path: "/etc/systemd/system/{{ otel_service_name }}.service"
+        state: absent
+      when: otel_unit.stat.exists
+
+    - name: Reload systemd after unit removal
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: otel_unit.stat.exists
+
+    - name: Remove collector install directory
+      ansible.builtin.file:
+        path: "{{ otel_install_dir }}"
+        state: absent
+
+    - name: Remove collector config directory
+      ansible.builtin.file:
+        path: "{{ otel_config_dir }}"
+        state: absent
+
+    - name: Find downloaded otel tarballs under /tmp
+      ansible.builtin.find:
+        paths: /tmp
+        patterns: 'otelcol-contrib_*.tar.gz'
+        file_type: file
+      register: otel_tarballs
+
+    - name: Remove downloaded tarball(s)
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ otel_tarballs.files | default([]) }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Remove dedicated otel system user
+      ansible.builtin.user:
+        name: "{{ otel_service_user }}"
+        state: absent
+        remove: true
+      when: otel_remove_service_user | bool
+
+    - name: Removal summary
+      ansible.builtin.debug:
+        msg:
+          - "OTel collector service/unit removed (if it existed): {{ otel_service_name }}"
+          - "Removed paths: {{ otel_install_dir }}, {{ otel_config_dir }}"
+          - "Service user removed: {{ otel_remove_service_user }} (user={{ otel_service_user }})"

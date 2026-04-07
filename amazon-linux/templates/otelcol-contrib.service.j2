@@ -1,0 +1,16 @@
+[Unit]
+Description=OpenTelemetry Collector Contrib
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=otelcol
+Group=otelcol
+ExecStart={{ otel_install_dir }}/otelcol-contrib --config {{ otel_config_path }}
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
