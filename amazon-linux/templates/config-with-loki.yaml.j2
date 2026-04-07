@@ -85,6 +85,19 @@ processors:
     send_batch_size: 1000
     timeout: 10s
 
+  {# journald 는 body 가 필드 맵이라 Loki 에서 JSON 덤프처럼 보임. Ubuntu filelog(한 줄 syslog) 와 비슷하게 맞춤. #}
+{% if monitor_logs | bool %}
+  transform/journald_to_syslog_line:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - set(body, Concat([String(time), " ", String(resource.attributes["host.name"]), " ", String(body["SYSLOG_IDENTIFIER"]), ": ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil and body["SYSLOG_IDENTIFIER"] != nil
+          - set(body, Concat([String(time), " ", String(resource.attributes["host.name"]), " ", String(body["_COMM"]), ": ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil and body["_COMM"] != nil
+          - set(body, Concat([String(time), " ", String(resource.attributes["host.name"]), " ", String(body["UNIT"]), ": ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil and body["UNIT"] != nil
+          - set(body, Concat([String(time), " ", String(resource.attributes["host.name"]), " journal: ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil
+{% endif %}
+
 exporters:
   debug:
     verbosity: basic
@@ -126,6 +139,6 @@ service:
 {% if monitor_logs | bool %}
     logs:
       receivers: [journald]
-      processors: [resource, batch]
+      processors: [resource, transform/journald_to_syslog_line, batch]
       exporters: ["otlphttp/loki"]
 {% endif %}
