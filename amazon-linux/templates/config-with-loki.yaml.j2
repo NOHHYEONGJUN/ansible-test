@@ -81,12 +81,8 @@ processors:
         action: upsert
 {% endif %}
 
-  batch:
-    send_batch_size: 1000
-    timeout: 10s
-
-  {# journald 는 body 가 필드 맵이라 Loki 에서 JSON 덤프처럼 보임. Ubuntu filelog(한 줄 syslog) 와 비슷하게 맞춤. #}
 {% if monitor_logs | bool %}
+  # journald body 는 맵이라 Loki 에 JSON 덤프처럼 보임 → syslog 한 줄로 평탄화 (batch 앞에 두어 YAML/템플릿에서 batch 하위로 잘못 중첩되는 경우 방지)
   transform/journald_to_syslog_line:
     error_mode: ignore
     log_statements:
@@ -98,6 +94,10 @@ processors:
           - 'set(body, Concat([String(time), " ", String(resource.attributes["host.name"]), " ", String(body["UNIT"]), ": ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil and body["UNIT"] != nil'
           - 'set(body, Concat([String(time), " ", String(resource.attributes["host.name"]), " journal: ", String(body["MESSAGE"])], "")) where IsMap(body) and body["MESSAGE"] != nil'
 {% endif %}
+
+  batch:
+    send_batch_size: 1000
+    timeout: 10s
 
 exporters:
   debug:
