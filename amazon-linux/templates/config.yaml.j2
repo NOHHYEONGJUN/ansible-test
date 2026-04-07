@@ -4,6 +4,7 @@ extensions:
     endpoint: 0.0.0.0:55679
 
 receivers:
+{% if monitor_metrics | bool %}
   hostmetrics:
     collection_interval: 10s
     scrapers:
@@ -12,7 +13,7 @@ receivers:
       load: {}
       disk: {}
       network: {}
-      filesystem: {}
+      {# filesystem 은 비루트 otelcol 에서 일부 마운트에서 실패·재시작 루프 유발(AL2023 등) #}
 
   prometheus:
     config:
@@ -21,6 +22,7 @@ receivers:
           scrape_interval: 10s
           static_configs:
             - targets: ["0.0.0.0:8888"]
+{% endif %}
 
   otlp:
     protocols:
@@ -44,6 +46,7 @@ exporters:
   debug:
     verbosity: basic
 
+{% if monitor_metrics | bool %}
   prometheusremotewrite:
     endpoint: "{{ otel_prom_rw_endpoint }}"
     timeout: 30s
@@ -51,6 +54,7 @@ exporters:
       X-Scope-OrgID: "{{ otel_prom_rw_org_id }}"
     resource_to_telemetry_conversion:
       enabled: true
+{% endif %}
 
 service:
   telemetry:
@@ -65,4 +69,9 @@ service:
       receivers: [hostmetrics, prometheus, otlp]
       processors: [resource, batch]
       exporters: [debug, prometheusremotewrite]
+{% else %}
+    metrics:
+      receivers: [otlp]
+      processors: [resource, batch]
+      exporters: [debug]
 {% endif %}

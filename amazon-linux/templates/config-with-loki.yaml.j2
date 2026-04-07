@@ -20,7 +20,6 @@ receivers:
       load: {}
       disk: {}
       network: {}
-      filesystem: {}
 
   prometheus:
     config:
@@ -95,6 +94,12 @@ service:
       receivers: [hostmetrics, prometheus, otlp]
       processors: [resource, batch]
       exporters: [debug, prometheusremotewrite]
+{% elif monitor_logs | bool %}
+    {# 메트릭 끄고 로그만 켠 경우에도 otlp 수신기는 파이프라인에 묶어야 함 #}
+    metrics:
+      receivers: [otlp]
+      processors: [resource, batch]
+      exporters: [debug]
 {% endif %}
 {% if monitor_logs | bool %}
     logs:
