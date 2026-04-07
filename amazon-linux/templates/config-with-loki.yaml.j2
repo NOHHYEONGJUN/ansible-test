@@ -88,7 +88,11 @@ processors:
 exporters:
   debug:
     verbosity: basic
-
+{# prometheusremotewrite 다음에 두면 들여쓰기가 한 단계 깊게 해석되어 otlphttp 가 그 블록 안으로 들어가 endpoint 키 중복 YAML 오류가 남 #}
+{% if monitor_logs | bool %}
+  "otlphttp/loki":
+    endpoint: "{{ otel_loki_endpoint | trim | regex_replace('/$', '') }}/otlp"
+{% endif %}
 {% if monitor_metrics | bool %}
   prometheusremotewrite:
     endpoint: "{{ otel_prom_rw_endpoint }}"
@@ -97,18 +101,6 @@ exporters:
       X-Scope-OrgID: "{{ otel_prom_rw_org_id }}"
     resource_to_telemetry_conversion:
       enabled: true
-{% endif %}
-
-{% if monitor_logs | bool %}
-  {# Loki OTLP HTTP — VM(수집기)에서 이 URL로 나갈 수 있어야 함. HTTPS+자체서명이면 extra_vars 로 템플릿 확장 또는 Loki 앞단 프록시 TLS 종료 권장 #}
-  "otlphttp/loki":
-    endpoint: "{{ otel_loki_endpoint | trim | regex_replace('/$', '') }}/otlp"
-    retry_on_failure:
-      enabled: true
-    sending_queue:
-      enabled: true
-      num_consumers: 4
-      queue_size: 100
 {% endif %}
 
 service:
