@@ -63,6 +63,7 @@
         update_cache: true
       when: ansible_distribution_major_version == '2'
 
+    # AL2023 기본은 curl-minimal — 전체 curl 패키지와 depsolve 충돌. get_url 은 Python urllib 사용 가능.
     - name: Ensure required packages (Amazon Linux 2023 — dnf)
       ansible.builtin.dnf:
         name:
@@ -149,19 +150,33 @@
         enabled: true
         state: started
 
-    - name: Wait for OTLP gRPC endpoint
-      ansible.builtin.wait_for:
-        host: 127.0.0.1
-        port: 4317
-        delay: 1
-        timeout: 30
+    - name: Wait for OTLP gRPC (show journal on timeout)
+      block:
+        - name: Wait for OTLP gRPC endpoint
+          ansible.builtin.wait_for:
+            host: 127.0.0.1
+            port: 4317
+            delay: 2
+            timeout: 45
+      rescue:
+        - name: Show otelcol journal after OTLP timeout
+          ansible.builtin.command: journalctl -u {{ otel_service_name }} -n 120 --no-pager
+          register: otel_journal
+          changed_when: false
+        - name: Fail with otelcol log excerpt
+          ansible.builtin.fail:
+            msg: >-
+              OTLP :4317 대기 초과(설정 오류·스크래퍼 실패로 재시작 루프 가능).
+              실행: journalctl -u {{ otel_service_name }} -f
+              최근 로그:
+              {{ otel_journal.stdout }}
 
     - name: Wait for internal prometheus metrics endpoint
       ansible.builtin.wait_for:
         host: 127.0.0.1
         port: 8888
-        delay: 1
-        timeout: 30
+        delay: 2
+        timeout: 45
 
     - name: Print deployment summary
       ansible.builtin.debug:
